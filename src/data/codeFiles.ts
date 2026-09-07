@@ -24,15 +24,21 @@ from werkzeug.utils import secure_filename
 
 # PyCryptodome imports (supports both pycryptodome and pycryptodomex)
 try:
-    from Cryptodome.Cipher import AES
-    from Cryptodome.Random import get_random_bytes
-    from Cryptodome.Protocol.KDF import PBKDF2
-    from Cryptodome.Hash import SHA256
-except ImportError:
     from Crypto.Cipher import AES
     from Crypto.Random import get_random_bytes
     from Crypto.Protocol.KDF import PBKDF2
     from Crypto.Hash import SHA256
+except ImportError:
+    try:
+        from Cryptodome.Cipher import AES
+        from Cryptodome.Random import get_random_bytes
+        from Cryptodome.Protocol.KDF import PBKDF2
+        from Cryptodome.Hash import SHA256
+    except ImportError:
+        AES = None
+        get_random_bytes = None
+        PBKDF2 = None
+        SHA256 = None
 
 # Google API client imports
 try:
@@ -582,5 +588,11 @@ threads = 4
 timeout = 3600
 keepalive = 65
 graceful_timeout = 60
+`;
+
+export const PYTHON_VERSION_FILE = `3.11.8
+`;
+
+export const RUNTIME_TXT = `python-3.11.8
 `;
 

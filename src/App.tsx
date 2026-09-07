@@ -21,11 +21,11 @@ import {
   CloudUpload,
   HardDrive
 } from 'lucide-react';
-import { PYTHON_APP_CODE, REQUIREMENTS_TXT, RENDER_YAML, INDEX_HTML, GUNICORN_CONF } from './data/codeFiles';
+import { PYTHON_APP_CODE, REQUIREMENTS_TXT, RENDER_YAML, INDEX_HTML, GUNICORN_CONF, PYTHON_VERSION_FILE, RUNTIME_TXT } from './data/codeFiles';
 
 export default function App() {
   const [activeTab, setActiveTab] = useState<'interactive' | 'code' | 'architecture' | 'guide'>('interactive');
-  const [selectedCodeFile, setSelectedCodeFile] = useState<'app.py' | 'templates/index.html' | 'requirements.txt' | 'render.yaml' | 'gunicorn.conf.py'>('app.py');
+  const [selectedCodeFile, setSelectedCodeFile] = useState<'app.py' | 'templates/index.html' | 'requirements.txt' | 'render.yaml' | 'gunicorn.conf.py' | '.python-version' | 'runtime.txt'>('app.py');
   const [copied, setCopied] = useState(false);
 
   // Interactive Simulator State
@@ -832,15 +832,17 @@ export default function App() {
                 <button
                   onClick={() => {
                     downloadFile('app.py', PYTHON_APP_CODE);
-                    setTimeout(() => downloadFile('requirements.txt', REQUIREMENTS_TXT), 250);
-                    setTimeout(() => downloadFile('render.yaml', RENDER_YAML), 500);
-                    setTimeout(() => downloadFile('gunicorn.conf.py', GUNICORN_CONF), 750);
-                    setTimeout(() => downloadFile('index.html', INDEX_HTML), 1000);
+                    setTimeout(() => downloadFile('requirements.txt', REQUIREMENTS_TXT), 200);
+                    setTimeout(() => downloadFile('render.yaml', RENDER_YAML), 400);
+                    setTimeout(() => downloadFile('gunicorn.conf.py', GUNICORN_CONF), 600);
+                    setTimeout(() => downloadFile('.python-version', PYTHON_VERSION_FILE), 800);
+                    setTimeout(() => downloadFile('runtime.txt', RUNTIME_TXT), 1000);
+                    setTimeout(() => downloadFile('index.html', INDEX_HTML), 1200);
                   }}
                   className="px-3.5 py-1.5 bg-emerald-600 hover:bg-emerald-500 text-white rounded-lg text-xs font-semibold flex items-center space-x-1.5 transition shadow-sm"
                 >
                   <Download className="w-3.5 h-3.5" />
-                  <span>Download All 5 Files</span>
+                  <span>Download All 7 Files</span>
                 </button>
               </div>
 
@@ -859,7 +861,7 @@ export default function App() {
                     <span>📁 Method 2: Download & Drag to GitHub</span>
                   </div>
                   <p className="text-slate-400 text-[11px] leading-relaxed">
-                    Upar <strong>&quot;Download All 5 Files&quot;</strong> dabayein. Phir <a href="https://github.com/new" target="_blank" rel="noreferrer" className="text-indigo-400 underline">github.com/new</a> par nayi repo banakar <strong>&quot;uploading an existing file&quot;</strong> se files drag & drop kar dein!
+                    Upar <strong>&quot;Download All 7 Files&quot;</strong> dabayein. Phir <a href="https://github.com/new" target="_blank" rel="noreferrer" className="text-indigo-400 underline">github.com/new</a> par nayi repo banakar <strong>&quot;uploading an existing file&quot;</strong> se files drag & drop kar dein!
                   </p>
                 </div>
               </div>
@@ -873,7 +875,7 @@ export default function App() {
               </div>
 
               <div className="flex items-center space-x-2 flex-wrap gap-1">
-                {(['app.py', 'templates/index.html', 'requirements.txt', 'gunicorn.conf.py', 'render.yaml'] as const).map((file) => (
+                {(['app.py', 'templates/index.html', 'requirements.txt', 'gunicorn.conf.py', '.python-version', 'runtime.txt', 'render.yaml'] as const).map((file) => (
                   <button
                     key={file}
                     onClick={() => setSelectedCodeFile(file)}
@@ -896,6 +898,8 @@ export default function App() {
                     if (selectedCodeFile === 'render.yaml') content = RENDER_YAML;
                     if (selectedCodeFile === 'templates/index.html') content = INDEX_HTML;
                     if (selectedCodeFile === 'gunicorn.conf.py') content = GUNICORN_CONF;
+                    if (selectedCodeFile === '.python-version') content = PYTHON_VERSION_FILE;
+                    if (selectedCodeFile === 'runtime.txt') content = RUNTIME_TXT;
                     copyCode(content);
                   }}
                   className="px-3 py-1.5 bg-slate-800 hover:bg-slate-700 text-slate-200 rounded-lg text-xs flex items-center space-x-1.5 transition"
@@ -910,6 +914,8 @@ export default function App() {
                     if (selectedCodeFile === 'requirements.txt') content = REQUIREMENTS_TXT;
                     if (selectedCodeFile === 'render.yaml') content = RENDER_YAML;
                     if (selectedCodeFile === 'gunicorn.conf.py') content = GUNICORN_CONF;
+                    if (selectedCodeFile === '.python-version') content = PYTHON_VERSION_FILE;
+                    if (selectedCodeFile === 'runtime.txt') content = RUNTIME_TXT;
                     if (selectedCodeFile === 'templates/index.html') {
                       content = INDEX_HTML;
                       filename = 'index.html';
@@ -937,6 +943,8 @@ export default function App() {
                   {selectedCodeFile === 'render.yaml' && RENDER_YAML}
                   {selectedCodeFile === 'templates/index.html' && INDEX_HTML}
                   {selectedCodeFile === 'gunicorn.conf.py' && GUNICORN_CONF}
+                  {selectedCodeFile === '.python-version' && PYTHON_VERSION_FILE}
+                  {selectedCodeFile === 'runtime.txt' && RUNTIME_TXT}
                 </code>
               </pre>
             </div>
