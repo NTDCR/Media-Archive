@@ -35,6 +35,8 @@ import {
   PYTHON_VERSION_FILE,
   RUNTIME_TXT
 } from './data/codeFiles';
+import { PWAInstallButton } from './components/PWAInstallButton';
+import { OfflineIndicator } from './components/OfflineIndicator';
 
 interface DriveDiagnostic {
   configured: boolean;
@@ -687,22 +689,25 @@ export default function App() {
       <header className="border-b border-slate-800 bg-slate-900/80 backdrop-blur-md sticky top-0 z-40">
         <div className="max-w-7xl mx-auto px-4 sm:px-6 h-16 flex items-center justify-between">
           <div className="flex items-center space-x-3">
-            <div className="w-10 h-10 rounded-xl bg-gradient-to-tr from-indigo-600 to-violet-500 flex items-center justify-center text-white shadow-lg shadow-indigo-500/20">
-              <FileVideo className="w-5 h-5" />
+            <div className="w-10 h-10 rounded-xl overflow-hidden shadow-lg shadow-amber-500/10 border border-amber-500/20 flex items-center justify-center bg-slate-900">
+              <img src="/icon.svg" alt="Notes" className="w-10 h-10 object-contain" />
             </div>
             <div>
               <div className="flex items-center space-x-2">
-                <span className="text-base font-bold text-white tracking-tight">MP4 Archive Consolidator</span>
-                <span className="px-2 py-0.5 text-[11px] font-semibold bg-emerald-500/20 text-emerald-300 border border-emerald-500/30 rounded-full flex items-center space-x-1">
-                  <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
-                  <span>Production Archiver</span>
+                <span className="text-base font-bold text-white tracking-tight">Notes</span>
+                <span className="px-2 py-0.5 text-[11px] font-semibold bg-amber-500/20 text-amber-300 border border-amber-500/30 rounded-full flex items-center space-x-1">
+                  <span className="w-1.5 h-1.5 rounded-full bg-amber-400 animate-pulse" />
+                  <span>Secure PWA Vault</span>
                 </span>
               </div>
-              <p className="text-xs text-slate-400">Single-User Personal Storage Pipeline & Cloud Backup</p>
+              <p className="text-xs text-slate-400">Personal Storage Pipeline, Notes & Cloud Archiver</p>
             </div>
           </div>
 
           <div className="flex items-center space-x-2">
+            {/* PWA In-App Install Button */}
+            <PWAInstallButton />
+
             {/* Engine Selector */}
             <div className="hidden sm:flex items-center bg-slate-950 p-1 rounded-lg border border-slate-800 text-xs">
               <button
@@ -1881,6 +1886,9 @@ export default function App() {
           </div>
         </div>
       )}
+
+      {/* Offline Status Indicator */}
+      <OfflineIndicator />
     </div>
   );
 }
