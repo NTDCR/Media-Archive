@@ -291,6 +291,12 @@
           <div id="progressBar" class="bg-gradient-to-r from-indigo-500 to-indigo-600 h-full rounded-full transition-all duration-300 ease-out" style="width: 0%"></div>
         </div>
 
+        <!-- Drive Diagnostics/Warning Notification Banner -->
+        <div id="driveWarningBanner" class="hidden p-3 rounded-xl border bg-amber-50 border-amber-200 text-amber-900 text-xs flex items-start space-x-2">
+          <svg class="w-4 h-4 text-amber-600 shrink-0 mt-0.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z"/></svg>
+          <span id="driveWarningText" class="leading-relaxed"></span>
+        </div>
+
         <!-- Milestone Status Grid -->
         <div class="grid grid-cols-1 sm:grid-cols-3 gap-3 pt-2">
           <div id="badgeDriveBackup" class="p-2.5 bg-slate-50 border border-slate-200 rounded-lg text-xs flex items-center space-x-2">
@@ -622,6 +628,8 @@
 
       document.getElementById("progressCard").classList.remove("hidden");
       document.getElementById("downloadSection").classList.add("hidden");
+      const driveWarn = document.getElementById("driveWarningBanner");
+      if (driveWarn) driveWarn.classList.add("hidden");
       document.getElementById("startBtn").disabled = true;
       document.getElementById("startBtn").classList.add("opacity-50");
 
@@ -686,6 +694,15 @@
 
           const data = await res.json();
           updateProgress(data.progress, data.stage);
+
+          if (data.drive_warning) {
+            const warnBanner = document.getElementById("driveWarningBanner");
+            const warnText = document.getElementById("driveWarningText");
+            if (warnBanner && warnText) {
+              warnText.textContent = data.drive_warning;
+              warnBanner.classList.remove("hidden");
+            }
+          }
 
           // Update milestone badges cleanly without terminal text spam
           if (data.data_drive_id) {

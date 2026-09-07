@@ -3,18 +3,20 @@ services:
     name: mp4-archive-consolidator
     env: python
     plan: free
-    buildCommand: pip install -r requirements.txt
-    startCommand: gunicorn --bind 0.0.0.0:$PORT --workers 1 --threads 4 --timeout 3600 app:app
+    region: oregon
+    buildCommand: "pip install --no-cache-dir -r requirements.txt"
+    startCommand: "gunicorn -c gunicorn.conf.py app:app"
+    healthCheckPath: /api/health
     envVars:
       - key: PYTHON_VERSION
         value: 3.11.8
       - key: ADMIN_PASSWORD
-        generateValue: true
+        value: admin123
       - key: MASTER_ENCRYPTION_KEY
+        generateValue: true
+      - key: FLASK_SECRET_KEY
         generateValue: true
       - key: GOOGLE_APPLICATION_CREDENTIALS_JSON
         sync: false
       - key: DRIVE_FOLDER_ID
         sync: false
-      - key: FLASK_SECRET_KEY
-        generateValue: true

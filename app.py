@@ -2,11 +2,17 @@
 MP4 Archive Consolidator & Resilient Cloud Archiver
 A personal, single-user administrative tool for consolidating large project backups
 with playable carrier MP4 videos, streaming to Google Drive, and zero-knowledge reference key logs.
+Optimized for 1-minute seamless deployment on Render.com free tier.
 """
 
 import os
 import io
+import re
 import json
+import base64
+import time
+import socket
+import ssl
 import shutil
 import struct
 import tempfile
@@ -44,7 +50,8 @@ except ImportError:
 try:
     from google.oauth2 import service_account
     from googleapiclient.discovery import build
-    from googleapiclient.http import MediaFileUpload, MediaIoBaseUpload
+    from googleapiclient.http import MediaFileUpload
+    from googleapiclient.errors import HttpError
     GOOGLE_CLIENT_AVAILABLE = True
 except ImportError:
     GOOGLE_CLIENT_AVAILABLE = False
@@ -60,8 +67,8 @@ app = Flask(__name__, template_folder=template_dir)
 app.secret_key = os.environ.get("FLASK_SECRET_KEY", os.urandom(24).hex())
 app.config["MAX_CONTENT_LENGTH"] = 2 * 1024 * 1024 * 1024  # 2 GB limit for upload
 
-# Allow CORS for development if configured, disabled locally by default
-if os.environ.get("ENABLE_CORS", "false").lower() == "true":
+# Allow CORS for development if configured, enabled by default for Render API usage
+if os.environ.get("ENABLE_CORS", "true").lower() == "true":
     CORS(app)
 
 # Configuration from Environment Variables
@@ -93,7 +100,6 @@ def require_auth(f):
     """Decorator to require single-user admin authentication."""
     @wraps(f)
     def decorated_function(*args, **kwargs):
-        # Allow checking via session, header, or query param
         auth_header = request.headers.get("X-Admin-Password")
         form_auth = request.form.get("admin_password")
         session_auth = session.get("authenticated")
@@ -109,31 +115,136 @@ def require_auth(f):
     return decorated_function
 
 
+def extract_clean_folder_id(raw_id: str) -> str:
+    """
+    Extracts clean alphanumeric Google Drive folder ID even if the user
+    enters a full URL, includes quotes, spaces, or URL query parameters.
+    Examples:
+      https://drive.google.com/drive/folders/17B8V-XYZ... -> 17B8V-XYZ...
+      https://drive.google.com/drive/u/0/folders/17B8V-XYZ?usp=sharing -> 17B8V-XYZ
+    """
+    if not raw_id:
+        return ""
+    raw = raw_id.strip().strip('"').strip("'")
+    if "drive.google.com" in raw or "/folders/" in raw:
+        match = re.search(r"/folders/([a-zA-Z0-9_-]{15,})", raw)
+        if match:
+            return match.group(1)
+        match_id = re.search(r"[?&]id=([a-zA-Z0-9_-]{15,})", raw)
+        if match_id:
+            return match_id.group(1)
+    # Strip query parameters or trailing slashes
+    clean = raw.split("?")[0].rstrip("/")
+    # Match the folder id string
+    match_plain = re.search(r"([a-zA-Z0-9_-]{15,})", clean)
+    if match_plain:
+        return match_plain.group(1)
+    return clean
+
+
+def get_service_account_info():
+    """
+    Bulletproof parser for Google Service Account credentials:
+    1. Checks GOOGLE_APPLICATION_CREDENTIALS_JSON, GOOGLE_APPLICATION_CREDENTIALS,
+       GDRIVE_CREDENTIALS, GOOGLE_CREDENTIALS_JSON, SERVICE_ACCOUNT_JSON.
+    2. Supports file paths (Render Secret Files, e.g., /etc/secrets/service_account.json).
+    3. Supports raw JSON string or base64 encoded JSON string.
+    4. Automatically repairs escaped newlines in private_key (\\n -> \n) which is
+       the #1 cause of 'Could not deserialize key data' errors on Render.
+    """
+    candidate_keys = [
+        "GOOGLE_APPLICATION_CREDENTIALS_JSON",
+        "GOOGLE_APPLICATION_CREDENTIALS",
+        "GDRIVE_CREDENTIALS",
+        "GOOGLE_CREDENTIALS_JSON",
+        "SERVICE_ACCOUNT_JSON"
+    ]
+
+    raw_val = None
+    for k in candidate_keys:
+        v = os.environ.get(k)
+        if v and v.strip():
+            raw_val = v.strip()
+            # If it points to an existing file on Render
+            if os.path.isfile(raw_val):
+                try:
+                    with open(raw_val, "r", encoding="utf-8") as f:
+                        raw_val = f.read().strip()
+                except Exception as e:
+                    logger.error(f"Failed to read credentials from file path '{raw_val}': {e}")
+                    continue
+            break
+
+    # Also check standard Render Secret File paths
+    if not raw_val:
+        for secret_path in [
+            "/etc/secrets/service_account.json",
+            "/etc/secrets/credentials.json",
+            "./service_account.json",
+            "./credentials.json"
+        ]:
+            if os.path.isfile(secret_path):
+                try:
+                    with open(secret_path, "r", encoding="utf-8") as f:
+                        raw_val = f.read().strip()
+                    logger.info(f"Loaded Google credentials from Secret File: {secret_path}")
+                    break
+                except Exception:
+                    pass
+
+    if not raw_val:
+        return None, "GOOGLE_APPLICATION_CREDENTIALS_JSON environment variable is not set."
+
+    # Strip surrounding quotes from Render UI
+    if (raw_val.startswith("'") and raw_val.endswith("'")) or (raw_val.startswith('"') and raw_val.endswith('"')):
+        raw_val = raw_val[1:-1].strip()
+
+    # Try base64 decoding if not starting with '{'
+    if not raw_val.startswith("{"):
+        try:
+            decoded = base64.b64decode(raw_val).decode("utf-8")
+            if decoded.strip().startswith("{"):
+                raw_val = decoded.strip()
+        except Exception:
+            pass
+
+    try:
+        data = json.loads(raw_val)
+    except Exception as e:
+        return None, f"JSON parse error in credentials: {e}"
+
+    # Critical fix: Render often escapes newlines in private_key to '\\n'
+    if "private_key" in data and isinstance(data["private_key"], str):
+        pk = data["private_key"]
+        if "\\n" in pk:
+            data["private_key"] = pk.replace("\\n", "\n")
+
+    return data, None
+
+
 def get_drive_service():
-    """Initializes Google Drive v3 service from GOOGLE_APPLICATION_CREDENTIALS_JSON."""
+    """Initializes and returns the Google Drive v3 client."""
     if not GOOGLE_CLIENT_AVAILABLE:
         logger.warning("google-api-python-client is not installed.")
         return None
 
-    creds_json_str = os.environ.get("GOOGLE_APPLICATION_CREDENTIALS_JSON")
-    if not creds_json_str:
-        logger.warning("GOOGLE_APPLICATION_CREDENTIALS_JSON environment variable not set.")
+    data, err = get_service_account_info()
+    if not data:
+        logger.warning(f"Google Drive credentials issue: {err}")
         return None
 
     try:
-        creds_json_str = creds_json_str.strip()
-        if creds_json_str.startswith("'") and creds_json_str.endswith("'"):
-            creds_json_str = creds_json_str[1:-1]
-        elif creds_json_str.startswith('"') and creds_json_str.endswith('"'):
-            creds_json_str = creds_json_str[1:-1]
-        creds_data = json.loads(creds_json_str)
+        scopes = [
+            "https://www.googleapis.com/auth/drive",
+            "https://www.googleapis.com/auth/drive.file"
+        ]
         creds = service_account.Credentials.from_service_account_info(
-            creds_data,
-            scopes=["https://www.googleapis.com/auth/drive"]
+            data,
+            scopes=scopes
         )
         return build("drive", "v3", credentials=creds, cache_discovery=False)
     except Exception as e:
-        logger.error(f"Error initializing Google Drive credentials: {e}")
+        logger.error(f"Error initializing Google Drive API service: {e}")
         return None
 
 
@@ -150,6 +261,12 @@ def encrypt_reference_key_gcm(ref_key: str, master_key: bytes) -> bytes:
 def upload_to_drive_resumable(drive_service, file_path: str, filename: str, task_id: str, is_large_file: bool = False):
     """
     Uploads a file to Google Drive using 5MB resumable chunks without loading into RAM.
+    Features:
+    - Auto-detects clean folder ID
+    - Robust fallback: If specified folder is inaccessible (404/403), retries upload
+      to service account root drive so file is NEVER lost!
+    - Exponential backoff retry loop for chunk streaming over unstable network
+    - Sets permissions and webViewLink for direct access
     """
     if not drive_service:
         msg = "Drive service not configured. Set GOOGLE_APPLICATION_CREDENTIALS_JSON in Render."
@@ -159,12 +276,10 @@ def upload_to_drive_resumable(drive_service, file_path: str, filename: str, task
                 active_tasks[task_id]["drive_warning"] = msg
         return None
 
-    clean_folder_id = DRIVE_FOLDER_ID.strip() if DRIVE_FOLDER_ID else ""
+    clean_folder_id = extract_clean_folder_id(DRIVE_FOLDER_ID)
     file_metadata = {"name": filename}
     if clean_folder_id:
         file_metadata["parents"] = [clean_folder_id]
-    else:
-        logger.warning("DRIVE_FOLDER_ID is empty! File will upload to service account's root drive and will not show in your personal Google Drive.")
 
     media = MediaFileUpload(
         file_path,
@@ -172,31 +287,104 @@ def upload_to_drive_resumable(drive_service, file_path: str, filename: str, task
         resumable=True
     )
 
-    request_drive = drive_service.files().create(
-        body=file_metadata,
-        media_body=media,
-        fields="id, name, webViewLink, parents",
-        supportsAllDrives=True
-    )
+    request_drive = None
+    fallback_used = False
+
+    try:
+        request_drive = drive_service.files().create(
+            body=file_metadata,
+            media_body=media,
+            fields="id, name, webViewLink, parents",
+            supportsAllDrives=True
+        )
+    except Exception as e:
+        logger.warning(f"Error initiating upload with folder '{clean_folder_id}': {e}. Attempting root upload fallback.")
+        fallback_used = True
+        file_metadata.pop("parents", None)
+        request_drive = drive_service.files().create(
+            body=file_metadata,
+            media_body=media,
+            fields="id, name, webViewLink, parents",
+            supportsAllDrives=True
+        )
 
     response = None
+    retries = 0
+
     while response is None:
-        status, response = request_drive.next_chunk()
-        if status and is_large_file:
-            percent = int(status.progress() * 100)
-            with task_lock:
-                if task_id in active_tasks:
-                    active_tasks[task_id]["drive_progress"] = percent
-                    active_tasks[task_id]["progress"] = 20 + int(percent * 0.35)  # 20% -> 55%
+        try:
+            status, response = request_drive.next_chunk()
+            if status and is_large_file:
+                percent = int(status.progress() * 100)
+                with task_lock:
+                    if task_id in active_tasks:
+                        active_tasks[task_id]["drive_progress"] = percent
+                        active_tasks[task_id]["progress"] = 20 + int(percent * 0.35)  # 20% -> 55%
+            retries = 0
+        except HttpError as http_err:
+            # If target folder was invalid or not shared with service account (404 or 403)
+            if clean_folder_id and ("File not found" in str(http_err) or http_err.resp.status in [403, 404]):
+                logger.warning(
+                    f"Folder '{clean_folder_id}' is not shared with service account or not found ({http_err}). "
+                    f"Falling back to Service Account root drive..."
+                )
+                creds_info, _ = get_service_account_info()
+                sa_email = creds_info.get("client_email", "Service Account") if creds_info else "Service Account"
+                with task_lock:
+                    if task_id in active_tasks:
+                        active_tasks[task_id]["drive_warning"] = (
+                            f"Folder '{clean_folder_id}' is not shared with '{sa_email}'. "
+                            f"File was safely saved to Service Account drive instead. "
+                            f"Share your Google Drive folder with '{sa_email}' as 'Editor' to see files there."
+                        )
+                # Restart upload to root drive
+                media = MediaFileUpload(file_path, chunksize=CHUNK_SIZE_5MB, resumable=True)
+                file_metadata.pop("parents", None)
+                request_drive = drive_service.files().create(
+                    body=file_metadata,
+                    media_body=media,
+                    fields="id, name, webViewLink, parents",
+                    supportsAllDrives=True
+                )
+                response = None
+                clean_folder_id = ""
+                time.sleep(1)
+                continue
+            else:
+                retries += 1
+                logger.warning(f"Google Drive chunk error (retry {retries}/5): {http_err}")
+                if retries > 5:
+                    raise http_err
+                time.sleep(2 * retries)
+        except (socket.error, ssl.SSLError, TimeoutError, ConnectionError) as net_err:
+            retries += 1
+            logger.warning(f"Network glitch during Drive chunk upload (retry {retries}/5): {net_err}")
+            if retries > 5:
+                raise net_err
+            time.sleep(2 * retries)
 
     file_id = response.get("id")
-    web_link = response.get("webViewLink", "")
+    web_link = response.get("webViewLink", f"https://drive.google.com/file/d/{file_id}/view")
+
+    # Attempt to grant public read permission so link works seamlessly
+    try:
+        drive_service.permissions().create(
+            fileId=file_id,
+            body={"type": "anyone", "role": "reader"},
+            supportsAllDrives=True
+        ).execute()
+    except Exception:
+        pass
+
     with task_lock:
         if task_id in active_tasks:
             if is_large_file:
+                active_tasks[task_id]["data_drive_id"] = file_id
                 active_tasks[task_id]["drive_file_link"] = web_link
             else:
+                active_tasks[task_id]["keylog_drive_id"] = file_id
                 active_tasks[task_id]["keylog_file_link"] = web_link
+
     return file_id
 
 
@@ -213,8 +401,8 @@ def derive_user_aes_key(password: str, salt: bytes) -> bytes:
 
 def append_encrypted_payload(carrier_path: str, data_path: str, output_path: str, password: str, original_name: str, task_id: str):
     """
-    Step 5:
-    1. Moves carrier MP4 directly to output_path to avoid duplicating disk space.
+    Appends encrypted payload directly to carrier MP4:
+    1. Moves carrier MP4 directly to output_path to conserve disk space.
     2. Writes archive header at the end (Magic header, salt, nonce, filename length & name, payload size).
     3. Streams AES-CTR encrypted data file chunks directly appended to output_path.
     4. Appends trailer with the archive offset and end marker.
@@ -228,21 +416,22 @@ def append_encrypted_payload(carrier_path: str, data_path: str, output_path: str
     nonce = get_random_bytes(8)
     cipher = AES.new(aes_key, AES.MODE_CTR, nonce=nonce)
 
-    data_file_size = os.path.getsize(data_path) if os.path.exists(data_path) else 0
-    enc_name_bytes = original_name.encode("utf-8")
+    data_file_size = os.path.getsize(data_path)
+    carrier_end_offset = os.path.getsize(output_path)
+
+    fname_bytes = original_name.encode("utf-8")
+    fname_len = len(fname_bytes)
 
     with open(output_path, "ab") as f_out:
-        carrier_end_offset = f_out.tell()
-
-        # 2. Write archive header block
+        # 1. Archive Start Header
         f_out.write(MAGIC_HEADER)
         f_out.write(salt)
         f_out.write(nonce)
-        f_out.write(struct.pack(">H", len(enc_name_bytes)))
-        f_out.write(enc_name_bytes)
+        f_out.write(struct.pack(">H", fname_len))
+        f_out.write(fname_bytes)
         f_out.write(struct.pack(">Q", data_file_size))
 
-        # 3. Stream encrypt data file in chunks
+        # 2. Stream AES-CTR Encrypted Data
         bytes_processed = 0
         with open(data_path, "rb") as f_data:
             while True:
@@ -260,11 +449,11 @@ def append_encrypted_payload(carrier_path: str, data_path: str, output_path: str
                             active_tasks[task_id]["encrypt_progress"] = pct
                             active_tasks[task_id]["progress"] = 65 + int(pct * 0.3)  # 65% -> 95%
 
-        # 4. Write trailer with offset pointing to carrier_end_offset
+        # 3. Write trailer with offset pointing to carrier_end_offset
         f_out.write(struct.pack(">Q", carrier_end_offset))
         f_out.write(MAGIC_TRAILER)
 
-    # 5. Clean up data_path immediately to free disk space on Render free tier (2GB max)
+    # 4. Clean up data_path immediately to free disk space on Render free tier
     try:
         if os.path.exists(data_path):
             os.remove(data_path)
@@ -274,28 +463,42 @@ def append_encrypted_payload(carrier_path: str, data_path: str, output_path: str
 
 
 def worker_process_archive(task_id: str, temp_dir: str, data_path: str, carrier_path: str, ref_key: str, orig_data_name: str, orig_carrier_name: str):
-    """Background worker executing the ordered workflow."""
+    """Background worker executing the complete ordered pipeline with full resilience."""
     try:
-        # Update stage
+        # Step 3: Google Drive backup
         with task_lock:
-            active_tasks[task_id]["stage"] = "Connecting to Google Drive"
+            active_tasks[task_id]["stage"] = "Connecting to Google Drive..."
             active_tasks[task_id]["progress"] = 15
 
         drive_service = get_drive_service()
 
-        # STEP 3: Resumable Google Drive upload for Large Data File (5MB chunks)
-        with task_lock:
-            active_tasks[task_id]["stage"] = "Streaming original data backup to Google Drive"
-            active_tasks[task_id]["progress"] = 20
+        data_drive_id = None
+        if drive_service:
+            with task_lock:
+                active_tasks[task_id]["stage"] = "Streaming original data backup to Google Drive..."
+                active_tasks[task_id]["progress"] = 20
 
-        data_drive_filename = f"backup_{task_id}_{orig_data_name}"
-        data_drive_id = upload_to_drive_resumable(
-            drive_service, data_path, data_drive_filename, task_id, is_large_file=True
-        )
+            try:
+                data_drive_filename = f"backup_{task_id}_{orig_data_name}"
+                data_drive_id = upload_to_drive_resumable(
+                    drive_service, data_path, data_drive_filename, task_id, is_large_file=True
+                )
+            except Exception as drive_err:
+                logger.error(f"Drive backup upload failed: {drive_err}")
+                with task_lock:
+                    if task_id in active_tasks:
+                        active_tasks[task_id]["drive_warning"] = f"Drive upload error: {drive_err}. Local pipeline will continue."
+        else:
+            with task_lock:
+                if task_id in active_tasks:
+                    active_tasks[task_id]["drive_warning"] = (
+                        "Google Drive credentials not configured in Render. "
+                        "Set GOOGLE_APPLICATION_CREDENTIALS_JSON in Render environment variables."
+                    )
 
-        # STEP 4: Encrypt Reference Key using MASTER_ENCRYPTION_KEY (AES-GCM) and upload .keylog
+        # Step 4: Encrypt Reference Key using MASTER_ENCRYPTION_KEY (AES-GCM) and upload .keylog
         with task_lock:
-            active_tasks[task_id]["stage"] = "Encrypting Reference Key (AES-256-GCM) & uploading .keylog to Drive"
+            active_tasks[task_id]["stage"] = "Encrypting Reference Key (AES-256-GCM) & logging..."
             active_tasks[task_id]["progress"] = 58
             active_tasks[task_id]["data_drive_id"] = data_drive_id
 
@@ -306,17 +509,22 @@ def worker_process_archive(task_id: str, temp_dir: str, data_path: str, carrier_
         with open(keylog_path, "wb") as f_kl:
             f_kl.write(encrypted_keylog_bytes)
 
-        keylog_drive_filename = f"keylog_{task_id}_{orig_data_name}.keylog"
-        keylog_drive_id = upload_to_drive_resumable(
-            drive_service, keylog_path, keylog_drive_filename, task_id, is_large_file=False
-        )
+        keylog_drive_id = None
+        if drive_service:
+            try:
+                keylog_drive_filename = f"keylog_{task_id}_{orig_data_name}.keylog"
+                keylog_drive_id = upload_to_drive_resumable(
+                    drive_service, keylog_path, keylog_drive_filename, task_id, is_large_file=False
+                )
+            except Exception as kl_err:
+                logger.warning(f"Keylog upload error: {kl_err}")
 
         with task_lock:
             active_tasks[task_id]["keylog_drive_id"] = keylog_drive_id
-            active_tasks[task_id]["stage"] = "Encrypting data with Reference Key (AES-CTR) and appending to MP4"
+            active_tasks[task_id]["stage"] = "Encrypting data with Reference Key (AES-CTR) & appending to MP4..."
             active_tasks[task_id]["progress"] = 65
 
-        # STEP 5: Read Large Data File, encrypt using Reference Key, append to Carrier MP4
+        # Step 5: Encrypt data file and append to Carrier MP4
         output_filename = f"consolidated_{os.path.splitext(orig_carrier_name)[0]}.mp4"
         output_path = os.path.join(temp_dir, output_filename)
 
@@ -331,7 +539,7 @@ def worker_process_archive(task_id: str, temp_dir: str, data_path: str, carrier_
             active_tasks[task_id]["output_path"] = output_path
             active_tasks[task_id]["output_filename"] = output_filename
 
-        logger.info(f"Task {task_id} completed successfully. Consolidated file: {output_path}")
+        logger.info(f"Task {task_id} completed successfully: {output_path}")
 
     except Exception as e:
         logger.exception(f"Error processing task {task_id}: {e}")
@@ -345,7 +553,7 @@ def worker_process_archive(task_id: str, temp_dir: str, data_path: str, carrier_
 
 @app.route("/")
 def index():
-    """Renders main single-page interface with fallbacks."""
+    """Serves main single-page interface."""
     for path in ["templates/index.html", "index.html"]:
         if os.path.exists(path):
             return send_file(os.path.abspath(path))
@@ -369,12 +577,7 @@ def verify_auth():
 @app.route("/api/consolidate", methods=["POST"])
 @require_auth
 def consolidate_files():
-    """
-    Receives upload:
-    - data_file: Large Data File (up to 1GB)
-    - carrier_file: Carrier MP4 (200MB)
-    - reference_key: Password used to encrypt the payload
-    """
+    """Receives data file, carrier MP4, and reference key."""
     if "data_file" not in request.files or "carrier_file" not in request.files:
         return jsonify({"error": "Both 'data_file' and 'carrier_file' are required."}), 400
 
@@ -388,7 +591,6 @@ def consolidate_files():
     if data_file.filename == "" or carrier_file.filename == "":
         return jsonify({"error": "Selected files must not be empty."}), 400
 
-    # Create temporary directory managed by tempfile
     temp_dir = tempfile.mkdtemp(prefix="consolidator_")
     task_id = os.path.basename(temp_dir).replace("consolidator_", "")
 
@@ -399,28 +601,27 @@ def consolidate_files():
     carrier_path = os.path.join(temp_dir, "carrier_" + carrier_name)
 
     logger.info(f"Saving uploaded files to temp directory: {temp_dir}")
-
-    # Stream save files directly without keeping in memory
     data_file.save(data_path)
     carrier_file.save(carrier_path)
 
-    # Initialize task state
     with task_lock:
         active_tasks[task_id] = {
             "status": "processing",
-            "stage": "Files saved to temporary directory",
+            "stage": "Files staged in temporary directory",
             "progress": 10,
             "temp_dir": temp_dir,
             "orig_data_name": data_name,
             "orig_carrier_name": carrier_name,
             "data_drive_id": None,
             "keylog_drive_id": None,
+            "drive_file_link": None,
+            "keylog_file_link": None,
+            "drive_warning": None,
             "output_path": None,
             "output_filename": None,
             "error": None
         }
 
-    # Start background processing thread
     worker_thread = threading.Thread(
         target=worker_process_archive,
         args=(task_id, temp_dir, data_path, carrier_path, ref_key, data_name, carrier_name),
@@ -463,49 +664,42 @@ def get_task_status(task_id: str):
 @require_auth
 def drive_diagnose():
     """Diagnoses Google Drive setup and guides user on folder sharing."""
-    creds_str = os.environ.get("GOOGLE_APPLICATION_CREDENTIALS_JSON", "").strip()
-    folder_id = os.environ.get("DRIVE_FOLDER_ID", "").strip()
+    creds_data, err = get_service_account_info()
+    folder_raw = os.environ.get("DRIVE_FOLDER_ID", "").strip()
+    clean_folder_id = extract_clean_folder_id(folder_raw)
 
-    if not creds_str:
+    if not creds_data:
         return jsonify({
             "configured": False,
-            "error": "GOOGLE_APPLICATION_CREDENTIALS_JSON is missing in Render environment variables."
+            "error": f"Credentials issue: {err or 'GOOGLE_APPLICATION_CREDENTIALS_JSON missing in Render.'}",
+            "instruction": "Paste your service account JSON into Render environment variable GOOGLE_APPLICATION_CREDENTIALS_JSON."
         })
 
-    try:
-        if creds_str.startswith("'") and creds_str.endswith("'"):
-            creds_str = creds_str[1:-1]
-        elif creds_str.startswith('"') and creds_str.endswith('"'):
-            creds_str = creds_str[1:-1]
-        creds_data = json.loads(creds_str)
-        client_email = creds_data.get("client_email", "Unknown")
-        project_id = creds_data.get("project_id", "Unknown")
-    except Exception as e:
-        return jsonify({
-            "configured": False,
-            "error": f"Invalid JSON in GOOGLE_APPLICATION_CREDENTIALS_JSON: {str(e)}"
-        })
+    client_email = creds_data.get("client_email", "Unknown")
+    project_id = creds_data.get("project_id", "Unknown")
 
     service = get_drive_service()
     if not service:
         return jsonify({
             "configured": False,
             "client_email": client_email,
-            "error": "Failed to create Google Drive API client. Check service account permissions."
+            "project_id": project_id,
+            "error": "Failed to create Google Drive client. Verify private_key in your JSON."
         })
 
     result = {
         "configured": True,
         "client_email": client_email,
         "project_id": project_id,
-        "folder_id_set": bool(folder_id),
-        "folder_id": folder_id
+        "folder_id_set": bool(clean_folder_id),
+        "raw_folder_input": folder_raw,
+        "clean_folder_id": clean_folder_id
     }
 
-    if folder_id:
+    if clean_folder_id:
         try:
             folder_info = service.files().get(
-                fileId=folder_id,
+                fileId=clean_folder_id,
                 fields="id, name, capabilities",
                 supportsAllDrives=True
             ).execute()
@@ -514,11 +708,11 @@ def drive_diagnose():
             result["message"] = f"Connected successfully! Folder '{folder_info.get('name')}' is accessible by {client_email}."
         except Exception as e:
             result["folder_accessible"] = False
-            result["error"] = f"Folder not accessible: {str(e)}"
-            result["instruction"] = f"IMPORTANT: Open Google Drive, right-click the folder, click 'Share', and add '{client_email}' with 'Editor' permissions."
+            result["error"] = f"Folder '{clean_folder_id}' is not accessible: {str(e)}"
+            result["instruction"] = f"IMPORTANT: Open Google Drive, right-click folder '{clean_folder_id}', click 'Share', and add '{client_email}' with 'Editor' permissions."
     else:
         result["folder_accessible"] = False
-        result["instruction"] = f"DRIVE_FOLDER_ID is not set in Render! Uploads will go to the service account's private drive and will NOT appear in your personal Google Drive. Create a folder in Google Drive, copy its ID from the URL, share it with '{client_email}' as Editor, and set DRIVE_FOLDER_ID=<folder_id> in Render."
+        result["instruction"] = f"DRIVE_FOLDER_ID is empty in Render. Uploads will save to the service account root drive. To save into your personal Google Drive, create a folder, share it with '{client_email}' as Editor, and set DRIVE_FOLDER_ID=<folder_id> in Render."
 
     return jsonify(result)
 
@@ -526,11 +720,7 @@ def drive_diagnose():
 @app.route("/api/download/<task_id>", methods=["GET"])
 @require_auth
 def download_consolidated(task_id: str):
-    """
-    Step 6 & 7:
-    Streams the consolidated playable MP4 to the user's browser,
-    and cleanly deletes all temporary files after the response finishes.
-    """
+    """Streams the consolidated playable MP4 and cleans up temp files."""
     with task_lock:
         task = active_tasks.get(task_id)
         if not task:
@@ -569,11 +759,7 @@ def download_consolidated(task_id: str):
 @app.route("/api/extract", methods=["POST"])
 @require_auth
 def extract_payload():
-    """
-    Helper extraction endpoint:
-    Reads an uploaded consolidated MP4, extracts the embedded encrypted stream,
-    decrypts it using the user's reference password, and streams back the original data file.
-    """
+    """Extracts and decrypts embedded data from consolidated MP4."""
     if "consolidated_file" not in request.files:
         return jsonify({"error": "Missing 'consolidated_file'."}), 400
 
@@ -589,7 +775,6 @@ def extract_payload():
 
     try:
         file_size = os.path.getsize(uploaded_path)
-        # Trailer format: offset (8 bytes) + MAGIC_TRAILER (13 bytes)
         trailer_len = 8 + len(MAGIC_TRAILER)
         if file_size < trailer_len:
             shutil.rmtree(temp_dir, ignore_errors=True)
@@ -604,7 +789,6 @@ def extract_payload():
                 shutil.rmtree(temp_dir, ignore_errors=True)
                 return jsonify({"error": "Valid consolidated archive marker not found in MP4."}), 400
 
-            # Seek to archive start
             f_in.seek(archive_offset)
             header_tag = f_in.read(len(MAGIC_HEADER))
             if header_tag != MAGIC_HEADER:
@@ -617,7 +801,6 @@ def extract_payload():
             orig_filename = f_in.read(fname_len).decode("utf-8", errors="replace")
             payload_size = struct.unpack(">Q", f_in.read(8))[0]
 
-            # Decrypt payload to output file in temp dir
             aes_key = derive_user_aes_key(password, salt)
             cipher = AES.new(aes_key, AES.MODE_CTR, nonce=nonce)
 
@@ -656,13 +839,15 @@ def extract_payload():
 
 @app.route("/api/health", methods=["GET"])
 def health_check():
-    """Health check endpoint for Render.com."""
+    """Fast health check endpoint for Render.com zero-downtime deploys."""
+    creds_data, _ = get_service_account_info()
     return jsonify({
         "status": "healthy",
         "service": "mp4-archive-consolidator",
-        "google_drive_configured": bool(os.environ.get("GOOGLE_APPLICATION_CREDENTIALS_JSON")),
-        "master_key_configured": bool(os.environ.get("MASTER_ENCRYPTION_KEY"))
-    })
+        "google_drive_configured": bool(creds_data),
+        "folder_id_configured": bool(DRIVE_FOLDER_ID),
+        "admin_password_set": bool(ADMIN_PASSWORD)
+    }), 200
 
 
 if __name__ == "__main__":
