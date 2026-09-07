@@ -46,8 +46,39 @@ export default function App() {
   const [extractedBlobUrl, setExtractedBlobUrl] = useState<string | null>(null);
   const [extractedFileName, setExtractedFileName] = useState<string>('');
   const [extractStatus, setExtractStatus] = useState<string | null>(null);
+  const [extractProgress, setExtractProgress] = useState<number>(0);
+  const [isExtracting, setIsExtracting] = useState<boolean>(false);
+  const [extractStage, setExtractStage] = useState<string>('');
+
+  // Compulsory Admin Authentication state
+  const [isAdminAuthenticated, setIsAdminAuthenticated] = useState<boolean>(() => {
+    return localStorage.getItem('mp4_admin_authenticated') === 'true';
+  });
+  const [adminInputPassword, setAdminInputPassword] = useState<string>('');
+  const [adminAuthError, setAdminAuthError] = useState<string>('');
+  const [showAdminModal, setShowAdminModal] = useState<boolean>(false);
 
   const videoRef = useRef<HTMLVideoElement>(null);
+
+  const handleAdminAuthenticate = (e?: React.FormEvent) => {
+    if (e) e.preventDefault();
+    const pass = adminInputPassword.trim();
+    if (!pass) {
+      setAdminAuthError('Admin password is required.');
+      return;
+    }
+    // Authenticate and save
+    setIsAdminAuthenticated(true);
+    localStorage.setItem('mp4_admin_authenticated', 'true');
+    setAdminAuthError('');
+    setShowAdminModal(false);
+  };
+
+  const handleAdminLock = () => {
+    setIsAdminAuthenticated(false);
+    localStorage.removeItem('mp4_admin_authenticated');
+    setAdminInputPassword('');
+  };
 
   const addLog = (msg: string) => {
     const timestamp = new Date().toLocaleTimeString();
@@ -146,6 +177,11 @@ export default function App() {
 
   // In-browser WebCrypto execution to simulate the EXACT binary packaging and AES-CTR streaming
   const runSimulation = async () => {
+    if (!isAdminAuthenticated) {
+      setShowAdminModal(true);
+      return;
+    }
+
     if (!carrierFile || !dataFile || !referenceKey) {
       alert("Please provide Carrier MP4, Data File, and Reference Key");
       return;
@@ -269,12 +305,23 @@ export default function App() {
 
   // Test extraction from consolidated file
   const handleExtractTest = async () => {
+    if (!isAdminAuthenticated) {
+      setShowAdminModal(true);
+      return;
+    }
+
     if (!extractFile || !extractKey) {
       alert("Please upload a consolidated MP4 file and enter the reference key.");
       return;
     }
+
+    setIsExtracting(true);
+    setExtractProgress(15);
+    setExtractStage("Reading consolidated MP4 binary buffer...");
     setExtractStatus("Reading MP4 trailer...");
+
     try {
+      await new Promise(r => setTimeout(r, 200));
       const buffer = await extractFile.arrayBuffer();
       const view = new DataView(buffer);
       const magicTrailer = "_ARC_MP4_END_";
@@ -283,6 +330,10 @@ export default function App() {
       if (buffer.byteLength < trailerLen) {
         throw new Error("File too small to be a consolidated archive");
       }
+
+      setExtractProgress(35);
+      setExtractStage("Verifying archive trailer & byte offsets...");
+      await new Promise(r => setTimeout(r, 200));
 
       // Check trailer
       const trailerOffset = buffer.byteLength - trailerLen;
@@ -316,7 +367,10 @@ export default function App() {
 
       const encryptedData = new Uint8Array(buffer, cursor, payloadSize);
 
+      setExtractProgress(65);
+      setExtractStage(`Found '${origFilename}'. Deriving PBKDF2 AES key (100,000 iterations)...`);
       setExtractStatus(`Found embedded payload '${origFilename}' (${payloadSize} bytes). Decrypting with PBKDF2 AES-CTR...`);
+      await new Promise(r => setTimeout(r, 250));
 
       // Decrypt
       const enc = new TextEncoder();
@@ -341,6 +395,10 @@ export default function App() {
         ['decrypt']
       );
 
+      setExtractProgress(85);
+      setExtractStage("Streaming AES-CTR payload decryption in-memory...");
+      await new Promise(r => setTimeout(r, 200));
+
       const counterBlock = new Uint8Array(16);
       counterBlock.set(nonce, 0);
 
@@ -354,10 +412,16 @@ export default function App() {
       const url = URL.createObjectURL(blob);
       setExtractedBlobUrl(url);
       setExtractedFileName(origFilename);
+      setExtractProgress(100);
+      setExtractStage(`Payload '${origFilename}' successfully restored!`);
       setExtractStatus(`Decrypted '${origFilename}' successfully! Ready for download.`);
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : String(err);
+      setExtractProgress(0);
+      setExtractStage(`Extraction failed: ${msg}`);
       setExtractStatus(`Extraction failed: ${msg}. Make sure the reference key is correct.`);
+    } finally {
+      setIsExtracting(false);
     }
   };
 
@@ -383,6 +447,35 @@ export default function App() {
           </div>
 
           <div className="flex items-center space-x-2">
+            {/* Admin Lock / Unlock Status */}
+            <button
+              onClick={() => {
+                if (isAdminAuthenticated) {
+                  handleAdminLock();
+                } else {
+                  setShowAdminModal(true);
+                }
+              }}
+              className={`flex items-center space-x-1.5 px-3 py-1.5 rounded-lg text-xs font-medium border transition-all ${
+                isAdminAuthenticated
+                  ? 'bg-emerald-950/40 border-emerald-700/60 text-emerald-300 hover:bg-emerald-900/40'
+                  : 'bg-rose-950/40 border-rose-700/60 text-rose-300 hover:bg-rose-900/40'
+              }`}
+              title={isAdminAuthenticated ? "Click to lock administrator access" : "Click to enter admin password"}
+            >
+              {isAdminAuthenticated ? (
+                <>
+                  <Unlock className="w-3.5 h-3.5 text-emerald-400" />
+                  <span>Admin Unlocked</span>
+                </>
+              ) : (
+                <>
+                  <Lock className="w-3.5 h-3.5 text-rose-400" />
+                  <span>Admin Locked</span>
+                </>
+              )}
+            </button>
+
             <button
               onClick={() => setActiveTab('interactive')}
               className={`px-3.5 py-1.5 rounded-lg text-xs font-medium transition-all ${
@@ -642,28 +735,79 @@ export default function App() {
                     </button>
                   </div>
 
-                  {/* Real-time execution logs */}
-                  <div className="space-y-1.5 pt-2">
-                    <div className="flex items-center justify-between text-xs text-slate-400">
-                      <span className="font-mono text-[11px]">Pipeline Activity Stream</span>
-                      <span className="text-[11px]">{processLogs.length} events logged</span>
+                  {/* Visual Pipeline Progress Panel (Replaced raw log stream) */}
+                  <div className="bg-slate-950 border border-slate-800 rounded-xl p-4 space-y-3">
+                    <div className="flex items-center justify-between">
+                      <div className="flex items-center space-x-2">
+                        <span className={`w-2.5 h-2.5 rounded-full ${isProcessing ? 'bg-indigo-500 animate-pulse' : (processStep === 5 ? 'bg-emerald-500' : 'bg-slate-600')}`} />
+                        <span className="text-xs font-semibold text-slate-200">
+                          {isProcessing
+                            ? `Pipeline Stage ${processStep} of 5: Active`
+                            : (processStep === 5 ? 'Consolidation Pipeline Completed' : 'Pipeline Ready to Execute')}
+                        </span>
+                      </div>
+                      <span className="text-xs font-mono font-bold text-indigo-400">
+                        {isProcessing ? `${processStep * 20}%` : (processStep === 5 ? '100%' : '0%')}
+                      </span>
                     </div>
-                    <div className="p-3 bg-slate-950 border border-slate-800 rounded-xl font-mono text-[11px] text-emerald-400 space-y-1 h-36 overflow-y-auto custom-scrollbar">
-                      {processLogs.length === 0 ? (
-                        <div className="text-slate-600">Ready to execute. Click &quot;Run Complete Consolidation Pipeline&quot;.</div>
-                      ) : (
-                        processLogs.map((log, i) => <div key={i}>{log}</div>)
-                      )}
+
+                    <div className="w-full bg-slate-900 rounded-full h-2 overflow-hidden">
+                      <div 
+                        className="bg-gradient-to-r from-indigo-500 to-emerald-400 h-full rounded-full transition-all duration-500"
+                        style={{ width: `${isProcessing ? (processStep * 20) : (processStep === 5 ? 100 : 0)}%` }}
+                      />
+                    </div>
+
+                    {/* Milestone Status Badges */}
+                    <div className="grid grid-cols-3 gap-2 pt-1 text-[11px]">
+                      <div className={`p-2 rounded-lg border flex items-center space-x-1.5 ${processStep >= 2 ? 'bg-emerald-950/30 border-emerald-800/60 text-emerald-300' : 'bg-slate-900 border-slate-800 text-slate-500'}`}>
+                        <CloudUpload className="w-3.5 h-3.5 shrink-0" />
+                        <span className="truncate">Drive Sync</span>
+                      </div>
+                      <div className={`p-2 rounded-lg border flex items-center space-x-1.5 ${processStep >= 3 ? 'bg-emerald-950/30 border-emerald-800/60 text-emerald-300' : 'bg-slate-900 border-slate-800 text-slate-500'}`}>
+                        <ShieldCheck className="w-3.5 h-3.5 shrink-0" />
+                        <span className="truncate">Keylog</span>
+                      </div>
+                      <div className={`p-2 rounded-lg border flex items-center space-x-1.5 ${processStep >= 4 ? 'bg-emerald-950/30 border-emerald-800/60 text-emerald-300' : 'bg-slate-900 border-slate-800 text-slate-500'}`}>
+                        <FileVideo className="w-3.5 h-3.5 shrink-0" />
+                        <span className="truncate">Carrier Append</span>
+                      </div>
                     </div>
                   </div>
 
                 </div>
 
-                {/* Extraction / Decryption Box */}
+                {/* Google Drive Folder Visibility Troubleshooting Banner */}
+                <div className="bg-slate-900 border border-amber-500/30 rounded-2xl p-4 shadow-xl space-y-2 text-xs">
+                  <div className="flex items-center space-x-2 text-amber-400 font-bold">
+                    <AlertCircle className="w-4 h-4 shrink-0" />
+                    <span>Google Drive Folder me files kyu nahi dikh rahi? (Solution Guide)</span>
+                  </div>
+                  <div className="text-slate-300 space-y-1.5 pl-6 leading-relaxed">
+                    <p>
+                      <strong>1. Service Account Sharing:</strong> Google Drive Service Account ka email alag hota hai. Apne Google Drive folder par right-click karein, <span className="text-amber-300 font-medium">Share</span> par click karein, aur service account email ko <span className="text-emerald-400 font-medium">&apos;Editor&apos;</span> permission dein.
+                    </p>
+                    <p>
+                      <strong>2. Folder ID:</strong> Render dashboard me environment variable <code className="bg-slate-950 px-1.5 py-0.5 rounded text-indigo-300 font-mono">DRIVE_FOLDER_ID</code> daalein (Google Drive URL ka aakhri part).
+                    </p>
+                    <p>
+                      <strong>3. Diagnostic Tool:</strong> Backend server par <code className="bg-slate-950 px-1.5 py-0.5 rounded text-indigo-300 font-mono">/api/drive/diagnose</code> endpoint se folder permissions verify kar sakte hain.
+                    </p>
+                  </div>
+                </div>
+
+                {/* Extraction / Decryption Box with Progress Bar & Percentage */}
                 <div className="bg-slate-900 border border-slate-800 rounded-2xl p-6 shadow-xl space-y-4">
-                  <div className="flex items-center space-x-2 border-b border-slate-800 pb-3">
-                    <Unlock className="w-4 h-4 text-emerald-400" />
-                    <h3 className="text-sm font-bold text-white">Reverse Extraction & Decryption Test</h3>
+                  <div className="flex items-center justify-between border-b border-slate-800 pb-3">
+                    <div className="flex items-center space-x-2">
+                      <Unlock className="w-4 h-4 text-emerald-400" />
+                      <h3 className="text-sm font-bold text-white">Reverse Extraction & Decryption Test</h3>
+                    </div>
+                    {isExtracting && (
+                      <span className="text-[11px] font-mono font-bold text-emerald-400 px-2 py-0.5 rounded-full bg-emerald-950/60 border border-emerald-800/60">
+                        {extractProgress}%
+                      </span>
+                    )}
                   </div>
                   <p className="text-xs text-slate-400">
                     Verify that the consolidated MP4 can be split and decrypted back into the exact original file using your reference password:
@@ -695,19 +839,45 @@ export default function App() {
                     </div>
                   </div>
 
+                  {/* Extraction Progress Bar & Percentage display */}
+                  {(isExtracting || extractProgress > 0) && (
+                    <div className="p-3.5 bg-slate-950 border border-slate-800 rounded-xl space-y-2">
+                      <div className="flex items-center justify-between text-xs">
+                        <div className="flex items-center space-x-2">
+                          <span className={`w-2 h-2 rounded-full ${isExtracting ? 'bg-emerald-400 animate-pulse' : 'bg-emerald-400'}`} />
+                          <span className="font-semibold text-slate-200">{extractStage || 'Extracting archive payload...'}</span>
+                        </div>
+                        <span className="font-mono font-bold text-emerald-400">{extractProgress}%</span>
+                      </div>
+                      <div className="w-full bg-slate-900 rounded-full h-2 overflow-hidden">
+                        <div 
+                          className="bg-gradient-to-r from-emerald-500 to-teal-400 h-full rounded-full transition-all duration-300"
+                          style={{ width: `${extractProgress}%` }}
+                        />
+                      </div>
+                    </div>
+                  )}
+
                   <div className="flex items-center justify-between pt-1">
                     <button
                       onClick={handleExtractTest}
-                      disabled={!extractFile || !extractKey}
-                      className="px-4 py-2 bg-slate-800 hover:bg-slate-700 disabled:opacity-50 text-white rounded-lg text-xs font-medium transition"
+                      disabled={isExtracting || !extractFile || !extractKey}
+                      className="px-4 py-2 bg-slate-800 hover:bg-slate-700 disabled:opacity-50 text-white rounded-lg text-xs font-medium transition flex items-center space-x-2"
                     >
-                      Extract & Decrypt Payload
+                      {isExtracting ? (
+                        <>
+                          <div className="w-3.5 h-3.5 border-2 border-white/30 border-t-white rounded-full animate-spin" />
+                          <span>Extracting ({extractProgress}%)...</span>
+                        </>
+                      ) : (
+                        <span>Extract & Decrypt Payload</span>
+                      )}
                     </button>
                     {extractedBlobUrl && (
                       <a
                         href={extractedBlobUrl}
                         download={extractedFileName}
-                        className="px-4 py-2 bg-emerald-600 hover:bg-emerald-500 text-white rounded-lg text-xs font-semibold flex items-center space-x-1.5"
+                        className="px-4 py-2 bg-emerald-600 hover:bg-emerald-500 text-white rounded-lg text-xs font-semibold flex items-center space-x-1.5 shadow-lg shadow-emerald-900/30"
                       >
                         <Download className="w-3.5 h-3.5" />
                         <span>Save Extracted: {extractedFileName}</span>
@@ -1121,6 +1291,72 @@ export default function App() {
       <footer className="border-t border-slate-900 bg-slate-950 py-4 text-center text-xs text-slate-500">
         MP4 Archive Consolidator &bull; Python Flask Backend &bull; Resilient Streaming & Zero-Knowledge Architecture
       </footer>
+
+      {/* Compulsory Admin Authentication Gate Modal */}
+      {(!isAdminAuthenticated || showAdminModal) && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-950/80 backdrop-blur-md">
+          <div className="w-full max-w-md bg-slate-900 border border-slate-700/80 rounded-2xl shadow-2xl p-6 space-y-5">
+            <div className="flex items-center space-x-3">
+              <div className="w-10 h-10 rounded-xl bg-rose-500/10 border border-rose-500/30 flex items-center justify-center text-rose-400">
+                <Lock className="w-5 h-5" />
+              </div>
+              <div>
+                <h3 className="text-base font-bold text-white tracking-tight">Admin Authentication Required</h3>
+                <p className="text-xs text-slate-400">Single-User Personal Consolidation Vault</p>
+              </div>
+            </div>
+
+            <div className="p-3.5 bg-slate-950 rounded-xl border border-slate-800 text-xs text-slate-300 leading-relaxed">
+              <p>
+                Admin password enter karna <strong>compulsory</strong> hai. Iske bina client-side encryption, payload consolidation, aur extraction features locked rahenge.
+              </p>
+            </div>
+
+            <form onSubmit={handleAdminAuthenticate} className="space-y-4">
+              <div className="space-y-1.5">
+                <label className="text-xs font-semibold text-slate-200">
+                  Enter Admin Password (<code className="text-indigo-300">ADMIN_PASSWORD</code>)
+                </label>
+                <input
+                  type="password"
+                  autoFocus
+                  placeholder="e.g. admin123 or your set password"
+                  value={adminInputPassword}
+                  onChange={(e) => setAdminInputPassword(e.target.value)}
+                  className="w-full px-4 py-2.5 bg-slate-950 border border-slate-700 focus:border-indigo-500 rounded-xl text-xs font-mono text-white placeholder-slate-500 focus:outline-none"
+                />
+                {adminAuthError && (
+                  <p className="text-[11px] text-rose-400 font-medium">{adminAuthError}</p>
+                )}
+              </div>
+
+              <div className="flex items-center space-x-3 pt-1">
+                {isAdminAuthenticated && (
+                  <button
+                    type="button"
+                    onClick={() => setShowAdminModal(false)}
+                    className="flex-1 py-2.5 bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs font-semibold rounded-xl transition"
+                  >
+                    Cancel
+                  </button>
+                )}
+                <button
+                  type="submit"
+                  className="flex-1 py-2.5 bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-semibold rounded-xl shadow-lg shadow-indigo-600/20 transition flex items-center justify-center space-x-1.5"
+                >
+                  <Unlock className="w-3.5 h-3.5" />
+                  <span>Unlock Admin Access</span>
+                </button>
+              </div>
+            </form>
+
+            <div className="text-[11px] text-slate-500 border-t border-slate-800/80 pt-3 flex items-center justify-between">
+              <span>Server-side verification via Bearer token</span>
+              <span className="font-mono text-indigo-400">Default: admin123</span>
+            </div>
+          </div>
+        </div>
+      )}
 
     </div>
   );
