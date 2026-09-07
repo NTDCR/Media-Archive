@@ -21,11 +21,11 @@ import {
   CloudUpload,
   HardDrive
 } from 'lucide-react';
-import { PYTHON_APP_CODE, REQUIREMENTS_TXT, RENDER_YAML, INDEX_HTML } from './data/codeFiles';
+import { PYTHON_APP_CODE, REQUIREMENTS_TXT, RENDER_YAML, INDEX_HTML, GUNICORN_CONF } from './data/codeFiles';
 
 export default function App() {
   const [activeTab, setActiveTab] = useState<'interactive' | 'code' | 'architecture' | 'guide'>('interactive');
-  const [selectedCodeFile, setSelectedCodeFile] = useState<'app.py' | 'templates/index.html' | 'requirements.txt' | 'render.yaml'>('app.py');
+  const [selectedCodeFile, setSelectedCodeFile] = useState<'app.py' | 'templates/index.html' | 'requirements.txt' | 'render.yaml' | 'gunicorn.conf.py'>('app.py');
   const [copied, setCopied] = useState(false);
 
   // Interactive Simulator State
@@ -832,14 +832,15 @@ export default function App() {
                 <button
                   onClick={() => {
                     downloadFile('app.py', PYTHON_APP_CODE);
-                    setTimeout(() => downloadFile('requirements.txt', REQUIREMENTS_TXT), 300);
-                    setTimeout(() => downloadFile('render.yaml', RENDER_YAML), 600);
-                    setTimeout(() => downloadFile('index.html', INDEX_HTML), 900);
+                    setTimeout(() => downloadFile('requirements.txt', REQUIREMENTS_TXT), 250);
+                    setTimeout(() => downloadFile('render.yaml', RENDER_YAML), 500);
+                    setTimeout(() => downloadFile('gunicorn.conf.py', GUNICORN_CONF), 750);
+                    setTimeout(() => downloadFile('index.html', INDEX_HTML), 1000);
                   }}
                   className="px-3.5 py-1.5 bg-emerald-600 hover:bg-emerald-500 text-white rounded-lg text-xs font-semibold flex items-center space-x-1.5 transition shadow-sm"
                 >
                   <Download className="w-3.5 h-3.5" />
-                  <span>Download All 4 Files</span>
+                  <span>Download All 5 Files</span>
                 </button>
               </div>
 
@@ -858,7 +859,7 @@ export default function App() {
                     <span>📁 Method 2: Download & Drag to GitHub</span>
                   </div>
                   <p className="text-slate-400 text-[11px] leading-relaxed">
-                    Upar <strong>&quot;Download All 4 Files&quot;</strong> dabayein. Phir <a href="https://github.com/new" target="_blank" rel="noreferrer" className="text-indigo-400 underline">github.com/new</a> par nayi repo banakar <strong>&quot;uploading an existing file&quot;</strong> se files drag & drop kar dein!
+                    Upar <strong>&quot;Download All 5 Files&quot;</strong> dabayein. Phir <a href="https://github.com/new" target="_blank" rel="noreferrer" className="text-indigo-400 underline">github.com/new</a> par nayi repo banakar <strong>&quot;uploading an existing file&quot;</strong> se files drag & drop kar dein!
                   </p>
                 </div>
               </div>
@@ -871,8 +872,8 @@ export default function App() {
                 <span className="text-sm font-bold text-white">Repository Files</span>
               </div>
 
-              <div className="flex items-center space-x-2">
-                {(['app.py', 'templates/index.html', 'requirements.txt', 'render.yaml'] as const).map((file) => (
+              <div className="flex items-center space-x-2 flex-wrap gap-1">
+                {(['app.py', 'templates/index.html', 'requirements.txt', 'gunicorn.conf.py', 'render.yaml'] as const).map((file) => (
                   <button
                     key={file}
                     onClick={() => setSelectedCodeFile(file)}
@@ -894,6 +895,7 @@ export default function App() {
                     if (selectedCodeFile === 'requirements.txt') content = REQUIREMENTS_TXT;
                     if (selectedCodeFile === 'render.yaml') content = RENDER_YAML;
                     if (selectedCodeFile === 'templates/index.html') content = INDEX_HTML;
+                    if (selectedCodeFile === 'gunicorn.conf.py') content = GUNICORN_CONF;
                     copyCode(content);
                   }}
                   className="px-3 py-1.5 bg-slate-800 hover:bg-slate-700 text-slate-200 rounded-lg text-xs flex items-center space-x-1.5 transition"
@@ -907,6 +909,7 @@ export default function App() {
                     let filename: string = selectedCodeFile;
                     if (selectedCodeFile === 'requirements.txt') content = REQUIREMENTS_TXT;
                     if (selectedCodeFile === 'render.yaml') content = RENDER_YAML;
+                    if (selectedCodeFile === 'gunicorn.conf.py') content = GUNICORN_CONF;
                     if (selectedCodeFile === 'templates/index.html') {
                       content = INDEX_HTML;
                       filename = 'index.html';
@@ -933,6 +936,7 @@ export default function App() {
                   {selectedCodeFile === 'requirements.txt' && REQUIREMENTS_TXT}
                   {selectedCodeFile === 'render.yaml' && RENDER_YAML}
                   {selectedCodeFile === 'templates/index.html' && INDEX_HTML}
+                  {selectedCodeFile === 'gunicorn.conf.py' && GUNICORN_CONF}
                 </code>
               </pre>
             </div>

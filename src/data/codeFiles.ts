@@ -22,11 +22,17 @@ from flask import (
 from flask_cors import CORS
 from werkzeug.utils import secure_filename
 
-# PyCryptodome imports
-from Cryptodome.Cipher import AES
-from Cryptodome.Random import get_random_bytes
-from Cryptodome.Protocol.KDF import PBKDF2
-from Cryptodome.Hash import SHA256
+# PyCryptodome imports (supports both pycryptodome and pycryptodomex)
+try:
+    from Cryptodome.Cipher import AES
+    from Cryptodome.Random import get_random_bytes
+    from Cryptodome.Protocol.KDF import PBKDF2
+    from Cryptodome.Hash import SHA256
+except ImportError:
+    from Crypto.Cipher import AES
+    from Crypto.Random import get_random_bytes
+    from Crypto.Protocol.KDF import PBKDF2
+    from Crypto.Hash import SHA256
 
 # Google API client imports
 try:
@@ -40,8 +46,10 @@ except ImportError:
 logging.basicConfig(level=logging.INFO, format="[%(asctime)s] [%(levelname)s] %(message)s")
 logger = logging.getLogger(__name__)
 
-app = Flask(__name__)
+template_dir = "templates" if os.path.isdir("templates") else "."
+app = Flask(__name__, template_folder=template_dir)
 app.secret_key = os.environ.get("FLASK_SECRET_KEY", os.urandom(24).hex())
+app.config["MAX_CONTENT_LENGTH"] = 2 * 1024 * 1024 * 1024  # 2 GB limit for upload
 
 if os.environ.get("ENABLE_CORS", "false").lower() == "true":
     CORS(app)
@@ -136,13 +144,18 @@ def append_encrypted_payload(carrier_path: str, data_path: str, output_path: str
     nonce = get_random_bytes(8)
     cipher = AES.new(aes_key, AES.MODE_CTR, nonce=nonce)
 
-    data_file_size = os.path.getsize(data_path)
+    if os.path.exists(carrier_path) and carrier_path != output_path:
+        shutil.move(carrier_path, output_path)
+
+    salt = get_random_bytes(16)
+    aes_key = derive_user_aes_key(password, salt)
+    nonce = get_random_bytes(8)
+    cipher = AES.new(aes_key, AES.MODE_CTR, nonce=nonce)
+
+    data_file_size = os.path.getsize(data_path) if os.path.exists(data_path) else 0
     enc_name_bytes = original_name.encode("utf-8")
 
-    with open(output_path, "wb") as f_out:
-        with open(carrier_path, "rb") as f_carrier:
-            shutil.copyfileobj(f_carrier, f_out, length=CHUNK_SIZE_5MB)
-
+    with open(output_path, "ab") as f_out:
         carrier_end_offset = f_out.tell()
 
         f_out.write(MAGIC_HEADER)
@@ -170,6 +183,12 @@ def append_encrypted_payload(carrier_path: str, data_path: str, output_path: str
 
         f_out.write(struct.pack(">Q", carrier_end_offset))
         f_out.write(MAGIC_TRAILER)
+
+    try:
+        if os.path.exists(data_path):
+            os.remove(data_path)
+    except Exception:
+        pass
 
 def worker_process_archive(task_id: str, temp_dir: str, data_path: str, carrier_path: str, ref_key: str, orig_data_name: str, orig_carrier_name: str):
     try:
@@ -205,7 +224,13 @@ def worker_process_archive(task_id: str, temp_dir: str, data_path: str, carrier_
 
 @app.route("/")
 def index():
-    return render_template("index.html")
+    for path in ["templates/index.html", "index.html"]:
+        if os.path.exists(path):
+            return send_file(os.path.abspath(path))
+    try:
+        return render_template("index.html")
+    except Exception:
+        return "<h1>MP4 Archive Consolidator is running.</h1>", 200
 
 @app.route("/api/auth/verify", methods=["POST"])
 def verify_auth():
@@ -362,6 +387,7 @@ if __name__ == "__main__":
 export const REQUIREMENTS_TXT = `flask>=3.0.0
 werkzeug>=3.0.0
 pycryptodome>=3.20.0
+pycryptodomex>=3.20.0
 google-api-python-client>=2.130.0
 google-auth>=2.29.0
 google-auth-httplib2>=0.2.0
@@ -545,3 +571,16 @@ export const INDEX_HTML = `<!DOCTYPE html>
 </body>
 </html>
 `;
+
+export const GUNICORN_CONF = `import os
+
+# Gunicorn configuration for Render deployment
+# Automatically sets timeout to 3600s so 1GB uploads/downloads never hit worker timeout
+bind = f"0.0.0.0:{os.environ.get('PORT', '5000')}"
+workers = 1
+threads = 4
+timeout = 3600
+keepalive = 65
+graceful_timeout = 60
+`;
+

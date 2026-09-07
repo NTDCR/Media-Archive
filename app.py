@@ -22,11 +22,17 @@ from flask import (
 from flask_cors import CORS
 from werkzeug.utils import secure_filename
 
-# PyCryptodome imports
-from Cryptodome.Cipher import AES
-from Cryptodome.Random import get_random_bytes
-from Cryptodome.Protocol.KDF import PBKDF2
-from Cryptodome.Hash import SHA256
+# PyCryptodome imports (supports both pycryptodome and pycryptodomex)
+try:
+    from Cryptodome.Cipher import AES
+    from Cryptodome.Random import get_random_bytes
+    from Cryptodome.Protocol.KDF import PBKDF2
+    from Cryptodome.Hash import SHA256
+except ImportError:
+    from Crypto.Cipher import AES
+    from Crypto.Random import get_random_bytes
+    from Crypto.Protocol.KDF import PBKDF2
+    from Crypto.Hash import SHA256
 
 # Google API client imports
 try:
@@ -43,8 +49,10 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-app = Flask(__name__)
+template_dir = "templates" if os.path.isdir("templates") else "."
+app = Flask(__name__, template_folder=template_dir)
 app.secret_key = os.environ.get("FLASK_SECRET_KEY", os.urandom(24).hex())
+app.config["MAX_CONTENT_LENGTH"] = 2 * 1024 * 1024 * 1024  # 2 GB limit for upload
 
 # Allow CORS for development if configured, disabled locally by default
 if os.environ.get("ENABLE_CORS", "false").lower() == "true":
@@ -107,6 +115,11 @@ def get_drive_service():
         return None
 
     try:
+        creds_json_str = creds_json_str.strip()
+        if creds_json_str.startswith("'") and creds_json_str.endswith("'"):
+            creds_json_str = creds_json_str[1:-1]
+        elif creds_json_str.startswith('"') and creds_json_str.endswith('"'):
+            creds_json_str = creds_json_str[1:-1]
         creds_data = json.loads(creds_json_str)
         creds = service_account.Credentials.from_service_account_info(
             creds_data,
@@ -179,34 +192,27 @@ def derive_user_aes_key(password: str, salt: bytes) -> bytes:
 def append_encrypted_payload(carrier_path: str, data_path: str, output_path: str, password: str, original_name: str, task_id: str):
     """
     Step 5:
-    1. Copies carrier MP4 directly to output in chunks.
+    1. Moves carrier MP4 directly to output_path to avoid duplicating disk space.
     2. Writes archive header at the end (Magic header, salt, nonce, filename length & name, payload size).
-    3. Streams AES-CTR encrypted data file chunks to output.
+    3. Streams AES-CTR encrypted data file chunks directly appended to output_path.
     4. Appends trailer with the archive offset and end marker.
+    5. Cleans up staging data_path immediately after encryption to free disk.
     """
+    if os.path.exists(carrier_path) and carrier_path != output_path:
+        shutil.move(carrier_path, output_path)
+
     salt = get_random_bytes(16)
     aes_key = derive_user_aes_key(password, salt)
     nonce = get_random_bytes(8)
     cipher = AES.new(aes_key, AES.MODE_CTR, nonce=nonce)
 
-    data_file_size = os.path.getsize(data_path)
+    data_file_size = os.path.getsize(data_path) if os.path.exists(data_path) else 0
     enc_name_bytes = original_name.encode("utf-8")
 
-    with open(output_path, "wb") as f_out:
-        # 1. Stream carrier MP4
-        with open(carrier_path, "rb") as f_carrier:
-            shutil.copyfileobj(f_carrier, f_out, length=CHUNK_SIZE_5MB)
-
+    with open(output_path, "ab") as f_out:
         carrier_end_offset = f_out.tell()
 
         # 2. Write archive header block
-        # Format:
-        # MAGIC_HEADER (11 bytes)
-        # Salt (16 bytes)
-        # Nonce (8 bytes)
-        # Filename length (2 bytes, big-endian uint16)
-        # Filename (UTF-8 bytes)
-        # Payload size (8 bytes, big-endian uint64)
         f_out.write(MAGIC_HEADER)
         f_out.write(salt)
         f_out.write(nonce)
@@ -235,6 +241,14 @@ def append_encrypted_payload(carrier_path: str, data_path: str, output_path: str
         # 4. Write trailer with offset pointing to carrier_end_offset
         f_out.write(struct.pack(">Q", carrier_end_offset))
         f_out.write(MAGIC_TRAILER)
+
+    # 5. Clean up data_path immediately to free disk space on Render free tier (2GB max)
+    try:
+        if os.path.exists(data_path):
+            os.remove(data_path)
+            logger.info(f"Removed staged data file {data_path} to conserve disk space.")
+    except Exception as e:
+        logger.warning(f"Could not remove staged data file: {e}")
 
 
 def worker_process_archive(task_id: str, temp_dir: str, data_path: str, carrier_path: str, ref_key: str, orig_data_name: str, orig_carrier_name: str):
@@ -309,8 +323,14 @@ def worker_process_archive(task_id: str, temp_dir: str, data_path: str, carrier_
 
 @app.route("/")
 def index():
-    """Renders main single-page interface."""
-    return render_template("index.html")
+    """Renders main single-page interface with fallbacks."""
+    for path in ["templates/index.html", "index.html"]:
+        if os.path.exists(path):
+            return send_file(os.path.abspath(path))
+    try:
+        return render_template("index.html")
+    except Exception:
+        return "<h1>MP4 Archive Consolidator is running.</h1>", 200
 
 
 @app.route("/api/auth/verify", methods=["POST"])

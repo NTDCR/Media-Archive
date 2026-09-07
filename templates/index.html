@@ -438,6 +438,10 @@
         } else {
           let err = "Upload failed.";
           try { err = JSON.parse(xhr.responseText).error || err; } catch(_) {}
+          if (xhr.status === 401) {
+            err = "Admin authentication required. Please enter your Admin Password.";
+            toggleAuthModal();
+          }
           addConsoleLog("ERROR: " + err);
           updateProgress(0, "Error: " + err);
           document.getElementById("startBtn").disabled = false;
