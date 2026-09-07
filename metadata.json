@@ -1,0 +1,6 @@
+{
+  "name": "MP4 Archive Consolidator",
+  "description": "Consolidate large project backups with playable carrier MP4 videos, cloud backup to Google Drive, and zero-knowledge encrypted reference keys.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

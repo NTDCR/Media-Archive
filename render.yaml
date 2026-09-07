@@ -1,0 +1,20 @@
+services:
+  - type: web
+    name: mp4-archive-consolidator
+    env: python
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: gunicorn --bind 0.0.0.0:$PORT --workers 1 --threads 4 --timeout 3600 app:app
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.11.8
+      - key: ADMIN_PASSWORD
+        generateValue: true
+      - key: MASTER_ENCRYPTION_KEY
+        generateValue: true
+      - key: GOOGLE_APPLICATION_CREDENTIALS_JSON
+        sync: false
+      - key: DRIVE_FOLDER_ID
+        sync: false
+      - key: FLASK_SECRET_KEY
+        generateValue: true
