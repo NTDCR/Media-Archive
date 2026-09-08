@@ -2,6 +2,7 @@ import React, { useState, useRef, useEffect } from 'react';
 import {
   FileVideo,
   KeyRound,
+  Key,
   ShieldCheck,
   UploadCloud,
   Lock,
@@ -111,8 +112,12 @@ export default function App() {
   const [driveDiag, setDriveDiag] = useState<DriveDiagnostic | null>(null);
   const [isTestingDrive, setIsTestingDrive] = useState(false);
   const [showDriveConfigModal, setShowDriveConfigModal] = useState(false);
-  const [configJsonInput, setConfigJsonInput] = useState('');
-  const [configFolderInput, setConfigFolderInput] = useState('');
+  const [configJsonInput, setConfigJsonInput] = useState<string>(() => {
+    return localStorage.getItem('vault_gdrive_json') || '';
+  });
+  const [configFolderInput, setConfigFolderInput] = useState<string>(() => {
+    return localStorage.getItem('vault_gdrive_folder') || '';
+  });
   const [configSaveMsg, setConfigSaveMsg] = useState('');
 
   const videoRef = useRef<HTMLVideoElement>(null);
@@ -655,10 +660,13 @@ export default function App() {
     }
   };
 
-  const saveDriveConfig = async (e: React.FormEvent) => {
-    e.preventDefault();
-    setConfigSaveMsg('Saving and testing credentials...');
+  const saveDriveConfig = async (e?: React.FormEvent, isClearing = false) => {
+    if (e) e.preventDefault();
+    setConfigSaveMsg(isClearing ? 'Clearing stored credentials...' : 'Saving and testing credentials...');
     try {
+      const jsonToSend = isClearing ? '' : configJsonInput.trim();
+      const folderToSend = isClearing ? '' : configFolderInput.trim();
+
       const res = await fetch('/api/drive/configure', {
         method: 'POST',
         headers: {
@@ -666,13 +674,23 @@ export default function App() {
           'x-admin-password': adminInputPassword
         },
         body: JSON.stringify({
-          service_account_json: configJsonInput,
-          folder_id: configFolderInput
+          service_account_json: jsonToSend,
+          folder_id: folderToSend
         })
       });
       const data = await res.json();
       if (data.success) {
-        setConfigSaveMsg('Saved successfully! Refreshing diagnostics...');
+        if (isClearing) {
+          localStorage.removeItem('vault_gdrive_json');
+          localStorage.removeItem('vault_gdrive_folder');
+          setConfigJsonInput('');
+          setConfigFolderInput('');
+          setConfigSaveMsg('Credentials cleared successfully.');
+        } else {
+          localStorage.setItem('vault_gdrive_json', jsonToSend);
+          localStorage.setItem('vault_gdrive_folder', folderToSend);
+          setConfigSaveMsg('Saved successfully! Refreshing diagnostics...');
+        }
         await fetchDriveDiagnostics();
         setTimeout(() => setShowDriveConfigModal(false), 1200);
       } else {
@@ -1367,6 +1385,16 @@ export default function App() {
                         <Download className="w-4 h-4" />
                         <span>Download Consolidated MP4</span>
                       </a>
+                      {activeTaskId && (
+                        <a
+                          href={`/api/keylog/download/${activeTaskId}`}
+                          download={`${dataFile?.name || 'payload'}.keylog`}
+                          className="w-full py-2 bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 rounded-xl text-xs font-semibold flex items-center justify-center space-x-2 transition"
+                        >
+                          <Key className="w-3.5 h-3.5 text-amber-400" />
+                          <span>Download .keylog (Encrypted Reference Key)</span>
+                        </a>
+                      )}
                     </div>
                   )}
                 </div>
@@ -1768,18 +1796,95 @@ export default function App() {
               </button>
             </div>
 
-            <form onSubmit={saveDriveConfig} className="space-y-4 text-xs">
+            <form onSubmit={(e) => saveDriveConfig(e, false)} className="space-y-4 text-xs">
+              {/* File Upload Button */}
               <div className="space-y-1">
                 <label className="font-semibold text-slate-300">
-                  Google Service Account JSON Content
+                  Upload Service Account JSON File
                 </label>
+                <div 
+                  onClick={() => document.getElementById('drive-sa-json-picker')?.click()}
+                  className="border border-dashed border-slate-700 hover:border-indigo-500 p-3 rounded-xl text-center cursor-pointer bg-slate-950 transition"
+                >
+                  <input
+                    id="drive-sa-json-picker"
+                    type="file"
+                    accept=".json,application/json"
+                    className="hidden"
+                    onChange={(e) => {
+                      const file = e.target.files?.[0];
+                      if (!file) return;
+                      const reader = new FileReader();
+                      reader.onload = (evt) => {
+                        const content = evt.target?.result as string;
+                        if (content) setConfigJsonInput(content);
+                      };
+                      reader.readAsText(file);
+                    }}
+                  />
+                  <span className="text-slate-400 text-xs">
+                    📁 Click to browse your downloaded <code className="text-indigo-400 font-mono">service_account.json</code> file
+                  </span>
+                </div>
+              </div>
+
+              <div className="space-y-1">
+                <div className="flex items-center justify-between">
+                  <label className="font-semibold text-slate-300">
+                    Or Paste Service Account JSON Content
+                  </label>
+                  {configJsonInput && (
+                    <button
+                      type="button"
+                      onClick={() => setConfigJsonInput('')}
+                      className="text-[11px] text-slate-500 hover:text-slate-300 underline"
+                    >
+                      Clear text
+                    </button>
+                  )}
+                </div>
                 <textarea
-                  rows={6}
+                  rows={5}
                   value={configJsonInput}
                   onChange={(e) => setConfigJsonInput(e.target.value)}
-                  placeholder="Paste contents of service_account.json here ({ &quot;type&quot;: &quot;service_account&quot;, ... })"
+                  placeholder='{ "type": "service_account", "project_id": "...", "private_key": "...", "client_email": "..." }'
                   className="w-full px-3 py-2 bg-slate-950 border border-slate-700 rounded-xl font-mono text-[11px] text-slate-200 focus:outline-none focus:border-indigo-500"
                 />
+
+                {/* Real-time JSON & Key ID Detection Banner */}
+                {configJsonInput.trim() && (
+                  <div>
+                    {/^[a-f0-9]{40}$/i.test(configJsonInput.trim()) ? (
+                      <div className="p-2.5 bg-rose-950/40 border border-rose-500/40 rounded-lg text-[11px] text-rose-300 font-mono leading-relaxed">
+                        ⚠️ <strong>Key ID Detected:</strong> You entered a 40-character Key ID ('{configJsonInput.trim().substring(0, 16)}...'). You need the full JSON file (starts with <code className="text-rose-200">&#123; "type": "service_account", ... &#125;</code>). In Google Cloud IAM & Admin &gt; Service Accounts &gt; Keys &gt; Add Key &gt; Create new key &gt; JSON to download the file.
+                      </div>
+                    ) : (
+                      (() => {
+                        try {
+                          const parsed = JSON.parse(configJsonInput.trim());
+                          if (parsed.client_email) {
+                            return (
+                              <div className="p-2 bg-emerald-950/40 border border-emerald-500/40 rounded-lg text-[11px] text-emerald-300 font-mono">
+                                ✅ Valid Service Account JSON for: <strong>{parsed.client_email}</strong> (Project: {parsed.project_id || 'detected'})
+                              </div>
+                            );
+                          }
+                          return (
+                            <div className="p-2 bg-amber-950/40 border border-amber-500/40 rounded-lg text-[11px] text-amber-300 font-mono">
+                              ⚠️ JSON parsed, but missing <code className="text-amber-200">client_email</code>.
+                            </div>
+                          );
+                        } catch {
+                          return (
+                            <div className="p-2 bg-slate-950 border border-slate-800 rounded-lg text-[11px] text-slate-400 font-mono">
+                              ⏳ Reading credentials...
+                            </div>
+                          );
+                        }
+                      })()
+                    )}
+                  </div>
+                )}
               </div>
 
               <div className="space-y-1">
@@ -1793,6 +1898,9 @@ export default function App() {
                   placeholder="e.g. 17B8S9-wE6D62W7h8G7... or https://drive.google.com/drive/folders/..."
                   className="w-full px-3 py-2 bg-slate-950 border border-slate-700 rounded-xl font-mono text-xs text-slate-200 focus:outline-none focus:border-indigo-500"
                 />
+                <p className="text-[11px] text-slate-500">
+                  Tip: Open the folder in Google Drive, click 'Share', and add your Service Account email as <strong>Editor</strong>.
+                </p>
               </div>
 
               {configSaveMsg && (
@@ -1802,6 +1910,13 @@ export default function App() {
               )}
 
               <div className="flex items-center space-x-2 pt-2">
+                <button
+                  type="button"
+                  onClick={() => saveDriveConfig(undefined, true)}
+                  className="px-3 py-2.5 bg-rose-950/50 hover:bg-rose-900/50 text-rose-300 border border-rose-500/30 rounded-xl font-medium text-xs transition"
+                >
+                  Clear
+                </button>
                 <button
                   type="button"
                   onClick={() => setShowDriveConfigModal(false)}
